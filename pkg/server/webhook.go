@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/golang/glog"
@@ -421,14 +422,24 @@ func updateLabels(target map[string]string, added map[string]string) (patch []pa
 func createPatch(pod *corev1.Pod, inj *config.InjectionConfig, annotations map[string]string) ([]byte, error) {
 	var patch []patchOperation
 
+	containerPorts := extractContainerPortsFromPod(*pod)
+	envVar := new(corev1.EnvVar)
+	envVar.Name = "APP_PORTS"
+	envVar.Value = strings.Join(containerPorts, ",")
+
+	//injectionConfig.Environment = append(injectionConfig.Environment, *envVar)
+	var envVarsToInject = make([]corev1.EnvVar, len(inj.Environment)+1)
+	copy(inj.Environment, envVarsToInject)
+	envVarsToInject[len(envVarsToInject)-1] = *envVar
+
 	// first, make sure any injected containers in our config get the EnvVars and VolumeMounts injected
 	// this mutates inj.Containers with our environment vars
-	mutatedInjectedContainers := mergeEnvVars(inj.Environment, inj.Containers)
+	mutatedInjectedContainers := mergeEnvVars(envVarsToInject, inj.Containers)
 	mutatedInjectedContainers = mergeVolumeMounts(inj.VolumeMounts, mutatedInjectedContainers)
 
 	// next, make sure any injected init containers in our config get the EnvVars and VolumeMounts injected
 	// this mutates inj.InitContainers with our environment vars
-	mutatedInjectedInitContainers := mergeEnvVars(inj.Environment, inj.InitContainers)
+	mutatedInjectedInitContainers := mergeEnvVars(envVarsToInject, inj.InitContainers)
 	mutatedInjectedInitContainers = mergeVolumeMounts(inj.VolumeMounts, mutatedInjectedInitContainers)
 
 	// next, patch containers with our injected containers
@@ -452,6 +463,7 @@ func createPatch(pod *corev1.Pod, inj *config.InjectionConfig, annotations map[s
 // main mutation process
 func (whsvr *WebhookServer) mutate(req *v1beta1.AdmissionRequest) *v1beta1.AdmissionResponse {
 	var pod corev1.Pod
+
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		glog.Errorf("Could not unmarshal raw object: %v", err)
 		injectionCounter.With(prometheus.Labels{"status": "error", "reason": "unmarshal_error", "requested": ""}).Inc()
@@ -510,6 +522,16 @@ func (whsvr *WebhookServer) mutate(req *v1beta1.AdmissionRequest) *v1beta1.Admis
 			return &pt
 		}(),
 	}
+}
+
+func extractContainerPortsFromPod(pod corev1.Pod) []string {
+	var ports []string
+	for _, container := range pod.Spec.Containers {
+		for _, containerPort := range container.Ports {
+			ports = append(ports, strconv.Itoa(int(containerPort.ContainerPort)))
+		}
+	}
+	return ports
 }
 
 // MetricsHandler method for webhook server
